@@ -1,0 +1,114 @@
+name: Train S2 market predictor and deploy static site
+
+on:
+  workflow_dispatch:
+  schedule:
+    # After regular US market close on weekdays.
+    - cron: "30 22 * * 1-5"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: read
+
+env:
+  MARKET_UNIVERSE: us-all
+  MARKET_PERIOD: 2y
+  MARKET_INTERVAL: 1d
+  MARKET_WORKERS: 12
+  MARKET_RETRIES: 2
+  MARKET_TIMEOUT: 30
+  MARKET_MIN_HISTORY_DAYS: 120
+  MARKET_TRAIN_LOOKBACK_DAYS: 160
+  MARKET_TRAIN_STRIDE: 5
+  MARKET_HORIZONS: 1,5
+  MARKET_PREDICTION_THRESHOLD: 0.0015
+  # 0 means no cap. Do not change unless intentionally debugging.
+  MARKET_MAX_TICKERS: 0
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  train-s2-market-predictor-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Restore live prediction state
+        uses: actions/cache/restore@v4
+        with:
+          path: docs/data/state
+          key: market-predictor-state-${{ github.run_id }}
+          restore-keys: |
+            market-predictor-state-
+
+      - name: Train, predict, score, and build site
+        run: >-
+          python scripts/s2_market_predictor.py
+          --universe "$MARKET_UNIVERSE"
+          --period "$MARKET_PERIOD"
+          --interval "$MARKET_INTERVAL"
+          --output-dir docs/data
+          --state-dir docs/data/state
+          --html docs/index.html
+          --workers "$MARKET_WORKERS"
+          --retries "$MARKET_RETRIES"
+          --timeout "$MARKET_TIMEOUT"
+          --max-tickers "$MARKET_MAX_TICKERS"
+          --min-history-days "$MARKET_MIN_HISTORY_DAYS"
+          --train-lookback-days "$MARKET_TRAIN_LOOKBACK_DAYS"
+          --train-stride "$MARKET_TRAIN_STRIDE"
+          --horizons "$MARKET_HORIZONS"
+          --prediction-threshold "$MARKET_PREDICTION_THRESHOLD"
+
+      - name: Save live prediction state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: docs/data/state
+          key: market-predictor-state-${{ github.run_id }}
+
+      - name: Ensure GitHub Pages marker exists
+        run: touch docs/.nojekyll
+
+      - name: Upload generated S2 market test artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2-market-predictor-data
+          path: |
+            docs/data/*.csv
+            docs/data/*.json
+            docs/data/state/*.csv
+            docs/index.html
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload static site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Deploy static site to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
